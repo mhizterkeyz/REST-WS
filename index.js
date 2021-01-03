@@ -17,7 +17,7 @@ const generateRandomString = (length = 8, factory = "abcdefghijklmnopqrst") => {
   return string;
 };
 
-//  Services
+// Errors
 function BadError(message) {
   this.message = message;
   this.action = "BadError";
@@ -27,6 +27,7 @@ function AuthenticationError(message) {
   this.action = "AuthenticationError";
 }
 
+// Database
 function DB() {
   function Model() {
     const entries = [];
@@ -64,6 +65,7 @@ function DB() {
   };
 }
 
+// Services
 function HandlerService() {
   const actionHandlers = {};
 
