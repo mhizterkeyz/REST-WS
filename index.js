@@ -18,13 +18,17 @@ const generateRandomString = (length = 8, factory = "abcdefghijklmnopqrst") => {
 };
 
 // Errors
-function BadError(message) {
+function BadError(message = "bad error") {
   this.message = message;
   this.action = "BadError";
 }
-function AuthenticationError(message) {
+function AuthenticationError(message = "invalid credentials") {
   this.message = message;
   this.action = "AuthenticationError";
+}
+function AuthorizationError(message = "unauthorized") {
+  this.message = message;
+  this.action = "AuthorizationError";
 }
 
 // Database
@@ -58,6 +62,11 @@ function DB() {
         });
       });
     };
+
+    this.customQuery = (cb = () => {}) => {
+      const entriesCopy = [...entries];
+      return cb(entriesCopy);
+    };
   }
 
   this.registerModel = () => {
@@ -73,8 +82,19 @@ function HandlerService() {
     return actionHandlers[key];
   };
 
-  this.registerHandler = function (key, handler) {
-    actionHandlers[key] = handler;
+  this.registerHandler = function (key, ...handlers) {
+    actionHandlers[key] = handlers;
+  };
+
+  this.callHandler = (key, arg) => {
+    const handlers = actionHandlers[key];
+    let lastValue;
+    if (handlers) {
+      handlers.forEach((handler) => {
+        lastValue = handler(arg);
+      });
+    }
+    return lastValue;
   };
 }
 
@@ -91,15 +111,14 @@ function WSService(handlerService) {
   const parseMessage = (socket, message) => {
     const { action, data } = JSON.parse(message);
 
-    const handler = handlerService.getHandler(action);
-    if (handler && typeof handler === "function") {
-      try {
-        const resp = handler(data, socket);
+    try {
+      const resp = handlerService.callHandler(action, { data, socket });
+      if (resp) {
         socket.send(JSON.stringify(resp));
-      } catch (error) {
-        const { action, message: data } = error;
-        socket.send(JSON.stringify({ action, data }));
       }
+    } catch (error) {
+      const { action, message: data } = error;
+      socket.send(JSON.stringify({ action, data }));
     }
   };
 
@@ -117,7 +136,7 @@ function WSService(handlerService) {
 }
 
 function AuthenticationService(userModel) {
-  this.login = (data) => {
+  this.login = ({ data, socket }) => {
     const user = userModel.findOne({
       username: data.username,
       password: data.password,
@@ -126,6 +145,7 @@ function AuthenticationService(userModel) {
     if (!user) {
       throw new AuthenticationError("invalid credentials");
     }
+    socket.id = user.id;
 
     return {
       action: "LoggedIn",
@@ -133,7 +153,7 @@ function AuthenticationService(userModel) {
     };
   };
 
-  this.signup = (data) => {
+  this.signup = ({ data, socket }) => {
     let user = userModel.findOne({ username: data.username });
 
     if (user) {
@@ -141,9 +161,53 @@ function AuthenticationService(userModel) {
     }
 
     user = userModel.create(data);
+    socket.id = user.id;
     return {
       action: "AccountCreated",
       data: user,
+    };
+  };
+
+  this.authorize = ({ socket }) => {
+    const { id } = socket;
+    const userExists = userModel.findOne({ id });
+    if (!userExists) {
+      throw new AuthorizationError();
+    }
+  };
+}
+
+function MessageService(messageModel, userModel) {
+  this.listPeople = ({ socket }) => {
+    const ommit = messageModel.customQuery((messages) => {
+      return messages
+        .filter((message) => {
+          return message.sender === socket.id || message.reciever === socket.id;
+        })
+        .reduce(
+          (acc, message) => {
+            if (message.sender === socket.id) {
+              acc.push(message.reciever);
+            } else {
+              acc.push(message.sender);
+            }
+            return acc;
+          },
+          [socket.id]
+        );
+    });
+
+    const people = userModel.customQuery((users) => {
+      return users
+        .filter((user) => {
+          return !ommit.includes(user.id);
+        })
+        .map((user) => ({ username: user.username, id: user.id }));
+    });
+
+    return {
+      action: "PeopleList",
+      data: people,
     };
   };
 }
@@ -151,9 +215,11 @@ function AuthenticationService(userModel) {
 //  main
 const db = new DB();
 const userModel = db.registerModel();
+const messageModel = db.registerModel();
 const handlerService = new HandlerService();
 const wsService = new WSService(handlerService);
 const authService = new AuthenticationService(userModel);
+const messageService = new MessageService(messageModel, userModel);
 
 ws.on("connection", (socket) => {
   wsService.registerSocket(socket);
@@ -162,6 +228,11 @@ ws.on("connection", (socket) => {
 //  handler registration
 handlerService.registerHandler("login", authService.login);
 handlerService.registerHandler("signup", authService.signup);
+handlerService.registerHandler(
+  "people",
+  authService.authorize,
+  messageService.listPeople
+);
 
 // Server inits
 const port = 8080;
